@@ -37,11 +37,11 @@ define MAP_SHARED     0x01
 define MAP_PRIVATE    0x02
 define MAP_FIXED      0x10
 define MAP_ANON       0x20
-define PROT_NONE      0000b
-define PROT_READ      0001b
-define PROT_WRITE     0010b
-define PROT_EXEC      0100b
-define PROT_SEM       1000b
+define PROT_NONE      0x0
+define PROT_READ      0x1
+define PROT_WRITE     0x2
+define PROT_EXEC      0x4
+define PROT_SEM       0x8
 define PROT_GROWSDOWN 0x01000000
 define PROT_GROWSUP   0x02000000
 

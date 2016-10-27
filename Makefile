@@ -7,7 +7,7 @@
 
 # GNU Make will see all files in these directories as if they were top-level.
 SHELL := /bin/bash
-VPATH = download
+VPATH = deps
 #------------------------------------------------------------------------------
 
 
@@ -45,16 +45,20 @@ ifeq ($(PLATFORM),linux)
     FASM_DL_HASH := cd80567beb6ab80bfb795eaba49afb56649e4c25
 endif
 
-./fasm: download/$(FASM_DL)
-	tar --strip-components=$(FASM_STRIP_COMPONENTS) -xzf $< $(FASM_DL_BIN)
-	touch fasm
+deps/bin/fasm: deps/$(FASM_DL)
+	mkdir -p deps/bin
+	cd deps \
+        && tar --strip-components=$(FASM_STRIP_COMPONENTS) \
+               -xzf $(FASM_DL) $(FASM_DL_BIN)
+	mv deps/fasm $@
+	touch $@
 
-download/fasm-linux-$(FASM_DL_VERSION).tgz:
-	mkdir -p download
-	curl $(FASM_URL) -o $@
+deps/fasm-linux-$(FASM_DL_VERSION).tgz:
+	mkdir -p deps
+	curl -L $(FASM_URL) -o $@
 	test `git hash-object $@` = $(FASM_DL_HASH)
 
-download/fasm-macos-$(FASM_DL_VERSION).tgz:
+deps/fasm-macos-$(FASM_DL_VERSION).tgz:
 	@echo "Error: fasm is not supported on macOS, although it is possible"\
 	" to make it work. Check back later."
 	@false 
@@ -62,43 +66,82 @@ download/fasm-macos-$(FASM_DL_VERSION).tgz:
 
 
 #------------------------------------------------------------------------------
+# Download and compile libsodium.
+LIBSODIUM_VERSION := 1.0.11
+LIBSODIUM_URL := "https://github.com/jedisct1/libsodium/releases/download/$(LIBSODIUM_VERSION)/libsodium-$(LIBSODIUM_VERSION).tar.gz"
+LIBSODIUM_DL := libsodium-$(LIBSODIUM_VERSION).tar.gz
+LIBSODIUM_DL_HASH := a20343925557869eac8d3d31d705c5d9ce252611
+
+deps/$(LIBSODIUM_DL):
+	mkdir -p deps
+	curl -L $(LIBSODIUM_URL) -o $@
+	test `git hash-object $@` = $(LIBSODIUM_DL_HASH)
+
+deps/include/sodium.h deps/lib/libsodium.a: deps/$(LIBSODIUM_DL)
+	cd deps \
+	&& tar -xzf $(LIBSODIUM_DL)
+	cd deps/libsodium-$(LIBSODIUM_VERSION) \
+	&& ./configure --prefix=`pwd`/../ \
+	&& make \
+	&& make install
+#------------------------------------------------------------------------------
+
+
+#------------------------------------------------------------------------------
+# Get all the above dependencies
+.PHONY: deps
+deps: deps/bin/fasm deps/include/sodium.h
+.INTERMEDIATE: deps/$(LIBSODIUM_DL) deps/$(FASM_DL)
+#------------------------------------------------------------------------------
+
+
+#------------------------------------------------------------------------------
 # Generate object files
-libeqh/syscalls.inc: libeqh/syscalls-$(PLATFORM).inc
-	rm -f $@
-	ln -s syscalls-$(PLATFORM).inc $@
+LDFLAGS := -i
+bin/libeqh.o: bin/libeqh_asm.o deps/lib/libsodium.a
+	ld $(LDFLAGS) -o $@ $^
 
-bin/%.linux.o bin/%-test.linux.o: libeqh/%.asm libeqh/syscalls.inc ./fasm 
-	mkdir -p bin
-	cd libeqh \
-	&& ../fasm $(shell [[ $* == *-test* ]] && echo "-d test=1") \
-                   $*.asm ../$@
-	rm -f libeqh/syscalls.inc
-
-bin/%.macos.o bin/%-test.macos.o: libeqh/%.asm libeqh/syscalls.inc \
-                                  ./fasm ./objconv 
-	mkdir -p bin
-	cd libeqh \
-	&& ../fasm $(shell [[ $* == *-test* ]] && echo "-d test=1") \
-                   $*.asm ../$@
-	./objconv -fmacho -ar:start:_start -nu $*.o $@
-	rm -f $*.o
-	rm -f libeqh/syscalls.inc
+bin/libeqh_test.o: bin/libeqh_asm_test.o deps/lib/libsodium.a
+	ld $(LDFLAGS) -o $@ $^
 
 bin/%.o: bin/%.$(PLATFORM).o
 	ln -f $< $@
 
-bin/bench_runner: bench_runner.c libeqh.h bin/libeqh.o
-	gcc -std=c99 -o $@ $< bin/libeqh.o
+bin/%.linux.o bin/%_test.linux.o: libeqh/%.asm libeqh/syscalls.inc deps/bin/fasm 
+	mkdir -p bin
+	cd libeqh \
+	&& ../deps/bin/fasm $(shell [[ $* == *_test* ]] && echo "-d testing=1") \
+                   $*.asm ../$@
+	rm -f libeqh/syscalls.inc
+
+bin/%.macos.o bin/%_test.macos.o: libeqh/%.asm libeqh/syscalls.inc \
+                                  deps/bin/fasm deps/objconv 
+	mkdir -p bin
+	cd libeqh \
+	&& ../deps/bin/fasm $(shell [[ $* == *_test* ]] && echo "-d testing=1") \
+                   $*.asm ../$@
+	deps/objconv -fmacho -ar:start:_start -nu $*.o $@
+	rm -f $*.o
+	rm -f libeqh/syscalls.inc
+
+libeqh/syscalls.inc: libeqh/syscalls-$(PLATFORM).inc
+	rm -f $@
+	ln -s syscalls-$(PLATFORM).inc $@
+
+CFLAGS += -std=c99 -O3
+bin/%.o:: libeqh/%.c
+	gcc $(CFLAGS) -c $< -o $@
 #------------------------------------------------------------------------------
 
 
 #------------------------------------------------------------------------------
 # Generate binaries
+CFLAGS += -I. -Ideps/include -Ldeps/lib
 bin/libeqh-bench: test/bench.c bin/libeqh.o libeqh.h
-	gcc -std=c99 -I. -o $@ bin/libeqh.o $<
+	gcc $(CFLAGS) -o $@ bin/libeqh.o $<
 
-bin/libeqh-test: test/test.c bin/libeqh-test.o libeqh.h test/greatest.h
-	gcc -std=c99 -I. -DLIBEQH_TEST -o $@ bin/libeqh-test.o $<
+bin/libeqh-test: test/test.c bin/libeqh_test.o libeqh.h test/greatest.h
+	gcc $(CFLAGS) -DLIBEQH_TEST -o $@ bin/libeqh_test.o $<
 #------------------------------------------------------------------------------
 
 
@@ -113,14 +156,16 @@ bench: bin/libeqh-bench
 
 #------------------------------------------------------------------------------
 # Cleaning up.
-.PHONY: distclean cleandl clean
-clean:
+.PHONY: distclean cleandl cleandeps clean
+clean: cleandl
 	rm -rf bin libeqh/syscalls.inc
 
 cleandl:
-	rm -rf download
+	rm -rf deps/libsodium*/ deps/*.tgz deps/*.tar.gz
 
-distclean: cleandl clean
-	rm -rf fasm
+cleandeps:
+	rm -rf deps
+
+distclean: cleandeps clean
 #------------------------------------------------------------------------------
 
